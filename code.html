@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ESP32 3-Phase Dashboard (Local)</title>
+
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- JustGage + Raphael -->
+<script src="https://cdn.jsdelivr.net/npm/raphael@2.3.0/raphael.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/justgage@1.6.1/justgage.min.js"></script>
+
+<style>
+  :root{
+    --bg:#07162a; --card:#10263f; --accent:#00f0ff; --muted:#9fb2c8;
+  }
+  body{margin:0;font-family:Inter,Segoe UI,Arial;background:var(--bg);color:#fff}
+  header{padding:12px 18px;background:linear-gradient(90deg,#0b2945 0%, #07172a 100%);display:flex;align-items:center;justify-content:space-between}
+  header h1{font-size:18px;margin:0;color:var(--accent)}
+  .top {display:flex;gap:12px;padding:14px;flex-wrap:wrap;justify-content:flex-start}
+  .stat{background:var(--card);padding:10px 14px;border-radius:10px;min-width:110px;text-align:center;box-shadow:0 6px 18px rgba(0,0,0,0.4)}
+  .stat h3{margin:0;font-size:12px;color:var(--muted)}
+  .stat h2{margin:4px 0 0;font-size:18px;color:var(--accent)}
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;padding:16px}
+  .card{background:var(--card);padding:14px;border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,0.5)}
+  .controls{display:flex;gap:8px;align-items:center}
+  .btn{background:#0b84ff;border:none;padding:8px 12px;border-radius:8px;color:#fff;cursor:pointer}
+  .btn.off{background:#444}
+  .small{font-size:13px;color:var(--muted)}
+  canvas{background:transparent}
+  @media(max-width:1000px){ .grid{grid-template-columns:repeat(1,1fr)} }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ESP32 3-Phase Dashboard — Local</h1>
+  <div style="display:flex;gap:12px;align-items:center">
+    <div class="small">ESP IP:</div>
+    <input id="espIp" type="text" placeholder="192.168.1.100" style="padding:6px;border-radius:6px;border:none" />
+    <button id="applyIp" class="btn">Áp dụng</button>
+  </div>
+</header>
+
+<div class="top" id="topStats">
+  <div class="stat"><h3>kVAh</h3><h2 id="kVAh">--</h2></div>
+  <div class="stat"><h3>kWh</h3><h2 id="kWh">--</h2></div>
+  <div class="stat"><h3>kVA</h3><h2 id="kVA">--</h2></div>
+  <div class="stat"><h3>Frequency</h3><h2 id="Freq">-- Hz</h2></div>
+  <div class="stat"><h3>Power Factor</h3><h2 id="PF">--</h2></div>
+  <div class="stat controls" style="min-width:200px">
+    <div style="text-align:left;">
+      <div class="small">Đèn (Relay)</div>
+      <div id="relayState" style="font-weight:600;color:var(--muted)">--</div>
+    </div>
+    <div style="margin-left:auto">
+      <button id="toggleRelay" class="btn off">Loading...</button>
+    </div>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3 style="margin:0 0 8px">Voltage (V)</h3>
+    <canvas id="voltageChart" height="160"></canvas>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">Current (A)</h3>
+    <canvas id="currentChart" height="160"></canvas>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">Voltage Gauges</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div id="g1" style="width:150px;height:110px"></div>
+      <div id="g2" style="width:150px;height:110px"></div>
+      <div id="g3" style="width:150px;height:110px"></div>
+      <div id="g4" style="width:150px;height:110px"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">Logs</h3>
+    <div id="log" style="height:170px;overflow:auto;background:#071a2a;padding:8px;border-radius:6px;font-size:13px;color:#bcd"></div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">Raw JSON</h3>
+    <pre id="raw" style="background:#071a2a;padding:8px;border-radius:6px;color:#bcd;height:170px;overflow:auto"></pre>
+  </div>
+
+  <div class="card">
+    <h3 style="margin:0 0 8px">Settings / Info</h3>
+    <div class="small">Polling: <span id="pollIntervalText">3000</span> ms</div>
+    <div style="margin-top:8px">
+      <label class="small">Poll interval (ms):</label><br>
+      <input id="pollInterval" type="number" value="3000" style="padding:6px;margin-top:6px;width:120px;border-radius:6px;border:none" />
+      <button id="applyPoll" class="btn" style="margin-left:8px">Áp dụng</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ========== Cấu hình (sửa ESP_BASE bằng IP của bạn hoặc nhập trong ô) ========== */
+let ESP_BASE = ""; // ví dụ "http://192.168.1.100"
+const DEFAULT_POLL = 3000;
+
+/* ========== Chart.js setup ========== */
+const maxPoints = 12;
+const timeLabels = [];
+const vDatasets = {
+  vry: {label:'V-RY', data:[], borderColor:'#00ffff'},
+  vyb: {label:'V-YB', data:[], borderColor:'#ffb300'},
+  vbr: {label:'V-BR', data:[], borderColor:'#ff6a6a'}
+};
+const voltageChart = new Chart(document.getElementById('voltageChart'), {
+  type:'line',
+  data:{labels:[], datasets: Object.values(vDatasets)},
+  options:{animation:false, scales:{y:{beginAtZero:false}}, plugins:{legend:{labels:{color:'#bfe'}}}}
+});
+const currentChart = new Chart(document.getElementById('currentChart'), {
+  type:'line',
+  data:{labels:[], datasets:[{label:'I (A)', data:[], borderColor:'#7eff8a'}]},
+  options:{animation:false, plugins:{legend:{labels:{color:'#bfe'}}}}
+});
+
+/* ========== Gauges ========== */
+const g1 = new JustGage({id:'g1', min:0, max:500, title:'R-Y'});
+const g2 = new JustGage({id:'g2', min:0, max:500, title:'Y-B'});
+const g3 = new JustGage({id:'g3', min:0, max:500, title:'B-R'});
+const g4 = new JustGage({id:'g4', min:0, max:500, title:'L-N'});
+
+/* ========== UI elements ========== */
+const kVAhEl = document.getElementById('kVAh'), kWhEl = document.getElementById('kWh'), kVAEl = document.getElementById('kVA');
+const freqEl = document.getElementById('Freq'), pfEl = document.getElementById('PF');
+const rawEl = document.getElementById('raw'), logEl = document.getElementById('log');
+const toggleBtn = document.getElementById('toggleRelay'), relayStateEl = document.getElementById('relayState');
+const espIpInput = document.getElementById('espIp'), applyIpBtn = document.getElementById('applyIp');
+const pollInput = document.getElementById('pollInterval'), applyPollBtn = document.getElementById('applyPoll');
+const pollText = document.getElementById('pollIntervalText');
+
+let pollInterval = DEFAULT_POLL;
+let pollTimer = null;
+let currentRelay = null; // 0 or 1
+
+/* ========== Helpers ========== */
+function log(msg){
+  const time = new Date().toLocaleTimeString();
+  logEl.innerText = `[${time}] ${msg}\n` + logEl.innerText;
+}
+function setESPBase(ip){
+  ip = ip.trim();
+  if(!ip) return false;
+  if(!ip.startsWith('http')) ip = 'http://' + ip;
+  ESP_BASE = ip.replace(/\/+$/,'');
+  log('ESP base set to ' + ESP_BASE);
+  espIpInput.value = ESP_BASE.replace(/^https?:\/\//,'');
+  return true;
+}
+
+/* ========== Data fetching & update ========== */
+async function fetchData(){
+  if(!ESP_BASE) return;
+  const url = ESP_BASE + '/data';
+  try{
+    const r = await fetch(url, {cache:'no-cache'});
+    if(!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    rawEl.textContent = JSON.stringify(data, null, 2);
+    // update top stats (safe checks)
+    if('kVAh' in data) kVAhEl.textContent = (Number(data.kVAh)||0).toFixed(1);
+    if('kWh' in data) kWhEl.textContent = (Number(data.kWh)||0).toFixed(1);
+    if('kVA' in data) kVAEl.textContent = (Number(data.kVA)||0).toFixed(2);
+    if('Freq' in data) freqEl.textContent = (Number(data.Freq)||0).toFixed(2) + ' Hz';
+    if('PF' in data) pfEl.textContent = (Number(data.PF)||0).toFixed(2);
+
+    // charts
+    const now = new Date().toLocaleTimeString().slice(0,5);
+    // labels
+    voltageChart.data.labels.push(now);
+    currentChart.data.labels.push(now);
+    if(voltageChart.data.labels.length > maxPoints) voltageChart.data.labels.shift();
+    if(currentChart.data.labels.length > maxPoints) currentChart.data.labels.shift();
+    // voltage points
+    const vry = Number(data.VRY) || 0;
+    const vyb = Number(data.VYB) || 0;
+    const vbr = Number(data.VBR) || 0;
+    const il = Number(data.I) || 0;
+    voltageChart.data.datasets[0].data.push(vry);
+    voltageChart.data.datasets[1].data.push(vyb);
+    voltageChart.data.datasets[2].data.push(vbr);
+    if(voltageChart.data.datasets[0].data.length > maxPoints) {
+      voltageChart.data.datasets.forEach(ds=>ds.data.shift());
+    }
+    currentChart.data.datasets[0].data.push(il);
+    if(currentChart.data.datasets[0].data.length > maxPoints) currentChart.data.datasets[0].data.shift();
+    voltageChart.update();
+    currentChart.update();
+
+    // gauges
+    g1.refresh(vry); g2.refresh(vyb); g3.refresh(vbr); g4.refresh(Number(data.VLN)||0);
+
+    // relay status (if provided)
+    if('relay' in data) {
+      currentRelay = Number(data.relay) ? 1 : 0;
+      updateRelayUI();
+    }
+
+    log('Data updated.');
+  } catch(err){
+    log('Fetch error: ' + err.message);
+  }
+}
+
+/* ========== Relay control ========== */
+function updateRelayUI(){
+  relayStateEl.textContent = currentRelay === 1 ? 'BẬT' : (currentRelay === 0 ? 'TẮT' : '--');
+  if(currentRelay === 1){
+    toggleBtn.textContent = 'TẮT ĐÈN';
+    toggleBtn.classList.remove('off');
+  } else if(currentRelay === 0){
+    toggleBtn.textContent = 'BẬT ĐÈN';
+    toggleBtn.classList.add('off');
+  } else {
+    toggleBtn.textContent = 'KẾT NỐI...';
+    toggleBtn.classList.add('off');
+  }
+}
+
+async function sendRelayCommand(state){
+  if(!ESP_BASE) { log('Chưa cấu hình ESP IP'); return; }
+  // Try POST JSON to /control first
+  const urlPost = ESP_BASE + '/control';
+  const urlGet = ESP_BASE + '/control?relay=' + (state?1:0);
+  try{
+    // prefer POST
+    const resp = await fetch(urlPost, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({relay: state?1:0})
+    });
+    if(resp.ok){
+      log('Sent POST /control -> ' + (state? 'ON':'OFF'));
+      // optimistic update
+      currentRelay = state?1:0;
+      updateRelayUI();
+      return;
+    } else {
+      // fallback to GET query
+      log('POST failed, fallback to GET: ' + resp.status);
+      const r2 = await fetch(urlGet);
+      if(r2.ok){ log('Sent GET control ok'); currentRelay = state?1:0; updateRelayUI(); return; }
+      else { throw new Error('GET failed ' + r2.status); }
+    }
+  } catch(e){
+    // final fallback: try GET
+    try {
+      const r3 = await fetch(urlGet);
+      if(r3.ok){
+        log('Fallback GET control ok');
+        currentRelay = state?1:0;
+        updateRelayUI();
+        return;
+      } else throw new Error('Fallback GET HTTP ' + r3.status);
+    } catch(err){
+      log('Control failed: ' + err.message);
+      alert('Lệnh chưa tới ESP32. Kiểm tra IP / CORS / WebServer trên ESP32.');
+    }
+  }
+}
+
+/* ========== Events ========== */
+toggleBtn.addEventListener('click', ()=>{
+  // toggle desired state
+  const desired = currentRelay === 1 ? 0 : 1;
+  sendRelayCommand(desired);
+});
+
+applyIpBtn.addEventListener('click', ()=>{
+  const ip = espIpInput.value.trim();
+  if(setESPBase(ip)){
+    // immediate fetch once
+    fetchData();
+  } else alert('Nhập IP hợp lệ (ví dụ 192.168.1.100)');
+});
+
+applyPollBtn.addEventListener('click', ()=>{
+  const v = Number(pollInput.value) || DEFAULT_POLL;
+  pollInterval = Math.max(500, v);
+  pollText.textContent = pollInterval;
+  restartPolling();
+});
+
+/* ========== Polling control ========== */
+function startPolling(){
+  if(pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(fetchData, pollInterval);
+  pollText.textContent = pollInterval;
+}
+function restartPolling(){
+  if(pollTimer) clearInterval(pollTimer);
+  startPolling();
+}
+
+/* ========== Init ========= */
+(function init(){
+  // if user typed IP before apply, allow pressing Enter
+  espIpInput.addEventListener('keyup', (e)=>{ if(e.key === 'Enter') applyIpBtn.click(); });
+  // set defaults
+  pollInterval = Number(pollInput.value) || DEFAULT_POLL;
+  pollText.textContent = pollInterval;
+  // try to read from input if prefilled
+  if(espIpInput.value.trim()) setESPBase(espIpInput.value.trim());
+  updateRelayUI();
+  startPolling();
+})();
+</script>
+
+</body>
+</html>
