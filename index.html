@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>ERA IoT Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/era-widget@latest/dist/era-widget.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/raphael@2.3.0/raphael.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/justgage@1.6.1/justgage.min.js"></script>
+<style>
+body{margin:0;font-family:Arial,sans-serif;background:#07162a;color:#fff}
+.card{background:#10263f;padding:10px;margin:8px;border-radius:8px}
+.status-dot{width:12px;height:12px;border-radius:50%;display:inline-block;margin-right:6px;}
+.status-ok{background:#0f0;} .status-off{background:#f00;} .status-wait{background:#ff0;}
+</style>
+</head>
+<body>
+
+<div class="card">Tần số: <span id="Freq">-- Hz</span></div>
+<div class="card">Điện áp TB: <span id="Vavg">-- V</span></div>
+<div class="card">Dòng TB: <span id="Iavg">-- A</span></div>
+<div class="card status">
+    <span class="status-dot status-wait" id="statusDot"></span>
+    <span id="statusText">Waiting...</span>
+</div>
+<div class="card">
+    <h4>Raw JSON</h4>
+    <pre id="raw" style="height:150px;overflow:auto;background:#071a2a;padding:6px;border-radius:4px;"></pre>
+</div>
+<div class="card">
+    <h4>Logs</h4>
+    <div id="log" style="height:150px;overflow:auto;background:#071a2a;padding:6px;border-radius:4px;font-size:12px;"></div>
+</div>
+
+<script>
+let ESP_BASE = "";
+const DEFAULT_POLL = 1000;
+
+// Elements
+const freqEl = document.getElementById('Freq');
+const vavgEl = document.getElementById('Vavg');
+const iavgEl = document.getElementById('Iavg');
+const rawEl = document.getElementById('raw');
+const logEl = document.getElementById('log');
+const statusDot = document.getElementById('statusDot');
+const statusText = document.getElementById('statusText');
+
+// Log helper
+function log(msg){
+    const time = new Date().toLocaleTimeString();
+    logEl.innerText = `[${time}] ${msg}\n` + logEl.innerText;
+}
+
+// Smooth filter
+function smooth(prev,current,alpha=0.2){ return isNaN(prev)?current:prev+alpha*(current-prev); }
+
+// Handle data
+function handleData(data){
+    let VA = smooth(window.VA_prev,data.VA||0);
+    let VB = smooth(window.VB_prev,data.VB||0);
+    let VC = smooth(window.VC_prev,data.VC||0);
+    let IA = smooth(window.IA_prev,data.IA||0);
+    let IB = smooth(window.IB_prev,data.IB||0);
+    let IC = smooth(window.IC_prev,data.IC||0);
+    let Freq = smooth(window.Freq_prev,data.Freq||0);
+
+    window.VA_prev=VA; window.VB_prev=VB; window.VC_prev=VC;
+    window.IA_prev=IA; window.IB_prev=IB; window.IC_prev=IC;
+    window.Freq_prev=Freq;
+
+    vavgEl.textContent = ((VA+VB+VC)/3).toFixed(1);
+    iavgEl.textContent = ((IA+IB+IC)/3).toFixed(1);
+    freqEl.textContent = Freq.toFixed(2)+' Hz';
+    rawEl.textContent = JSON.stringify(data,null,2);
+}
+
+// Set ESP base
+function setESPBase(ip){
+    ip = ip.trim(); if(!ip.startsWith('http')) ip='http://'+ip;
+    ESP_BASE = ip; log('ESP base set: '+ESP_BASE);
+}
+
+// Fetch ESP32 data
+async function fetchESPData(){
+    if(!ESP_BASE) return;
+    try{
+        const res = await fetch(ESP_BASE+'/data');
+        if(!res.ok) throw new Error(res.statusText);
+        const data = await res.json();
+        handleData(data);
+        statusDot.className='status-dot status-ok';
+        statusText.innerText='ESP Online';
+        log('ESP data updated');
+    }catch(e){
+        statusDot.className='status-dot status-off';
+        statusText.innerText='ESP Offline';
+        log('ESP fetch error: '+e.message);
+    }
+}
+
+// Initialize EraWidget
+const eraWidget = new EraWidget();
+eraWidget.init({
+    onConfiguration:(config)=>{ log('ERa configured'); },
+    onValues:(values)=>{
+        handleData(values);
+        statusDot.className='status-dot status-ok';
+        statusText.innerText='ERa Online';
+        log('ERa data updated');
+    }
+});
+
+// Receive config from parent
+window.addEventListener('message', (event)=>{
+    const cfg = event.data;
+    console.log('Received config',cfg);
+    if(cfg.espIp) setESPBase(cfg.espIp);
+    if(cfg.source==='esp') fetchESPData();
+});
+setInterval(()=>{ if(ESP_BASE) fetchESPData(); }, DEFAULT_POLL);
+</script>
+
+</body>
+</html>
